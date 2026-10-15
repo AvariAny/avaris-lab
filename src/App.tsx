@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { apiEndpoint } from "./api";
 
 type Status = "IDEA" | "CONCEPT" | "DESIGN" | "DEVELOPMENT" | "PRODUCTION";
 
@@ -250,6 +251,8 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
   const [response, setResponse] = useState<unknown>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [healthStatus, setHealthStatus] = useState<"checking" | "connected" | "disconnected">("checking");
+  const [healthDetail, setHealthDetail] = useState("");
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => event.key === "Escape" && onClose();
@@ -261,6 +264,90 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
     };
   }, [onClose]);
 
+  useEffect(() => {
+    const healthUrl = apiEndpoint("health");
+    let isActive = true;
+    let controller: AbortController | null = null;
+    let timeoutId: number | undefined;
+
+    if (!healthUrl) {
+      setHealthStatus("disconnected");
+      setHealthDetail("VITE_API_URL no está configurada.");
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const checkHealth = async () => {
+      if (!isActive || controller) return;
+
+      const requestController = new AbortController();
+      controller = requestController;
+      setHealthStatus("checking");
+      setHealthDetail("");
+      timeoutId = window.setTimeout(() => requestController.abort(), 5000);
+
+      try {
+        const result = await fetch(healthUrl, {
+          method: "GET",
+          signal: requestController.signal,
+        });
+
+        if (!result.ok) {
+          if (isActive) {
+            setHealthStatus("disconnected");
+            setHealthDetail(`El backend respondió HTTP ${result.status}.`);
+          }
+          return;
+        }
+
+        let data: unknown;
+        try {
+          data = await result.json();
+        } catch {
+          if (isActive) {
+            setHealthStatus("disconnected");
+            setHealthDetail(
+              requestController.signal.aborted
+                ? "Tiempo de espera agotado al consultar /health."
+                : "La respuesta de /health no contiene JSON válido.",
+            );
+          }
+          return;
+        }
+
+        if (data && typeof data === "object" && "status" in data && data.status === "ok") {
+          if (isActive) setHealthStatus("connected");
+        } else if (isActive) {
+          setHealthStatus("disconnected");
+          setHealthDetail('La respuesta de /health no coincide con {"status":"ok"}.');
+        }
+      } catch {
+        if (isActive) {
+          setHealthStatus("disconnected");
+          setHealthDetail(
+            requestController.signal.aborted
+              ? "Tiempo de espera agotado al consultar /health."
+              : "No se pudo conectar; verifica la red o la configuración CORS.",
+          );
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (controller === requestController) controller = null;
+      }
+    };
+
+    void checkHealth();
+    const intervalId = window.setInterval(() => void checkHealth(), 15000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+      controller?.abort();
+    };
+  }, []);
+
   const analyze = async () => {
     if (!demoText.trim() || processing) return;
     setProcessing(true);
@@ -268,15 +355,15 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
     setError(null);
     setCopyStatus("idle");
 
-    const apiUrl = import.meta.env.VITE_API_URL?.replace(/\/+$/, "");
-    if (!apiUrl) {
+    const predictUrl = apiEndpoint("predict");
+    if (!predictUrl) {
       setError("Falta configurar VITE_API_URL para conectar con el servicio.");
       setProcessing(false);
       return;
     }
 
     try {
-      const result = await fetch(`${apiUrl}/predict`, {
+      const result = await fetch(predictUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: demoText }),
@@ -379,6 +466,11 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
         <div className="demo-console">
           <div className="demo-input-panel">
             <div className="console-bar"><span>POST /predict</span><span>API_MODE = LIVE</span></div>
+            <div className={`api-health api-health--${healthStatus}`} role="status" aria-live="polite">
+              <span className="api-health-dot" aria-hidden="true" />
+              <span>{healthStatus === "checking" ? "Comprobando conexión..." : healthStatus === "connected" ? "API conectada" : "API desconectada"}</span>
+              {healthDetail && <small>{healthDetail}</small>}
+            </div>
             <label htmlFor="risk-input">INPUT / SPANISH TEXT</label>
             <textarea id="risk-input" value={demoText} onChange={(event) => setDemoText(event.target.value)} placeholder="Introduce una frase de prueba…" />
             <div className="demo-controls">
