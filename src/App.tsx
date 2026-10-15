@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 type Status = "IDEA" | "CONCEPT" | "DESIGN" | "DEVELOPMENT" | "PRODUCTION";
 
@@ -159,6 +159,31 @@ const categories = [
   "Experimental Concepts",
 ];
 
+function JsonResponse({ value }: { value: string }) {
+  const tokenPattern = /"(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g;
+  const parts: ReactNode[] = [];
+  let position = 0;
+
+  for (const [index, match] of Array.from(value.matchAll(tokenPattern)).entries()) {
+    const token = match[0];
+    const start = match.index ?? 0;
+    if (start > position) parts.push(<span key={`text-${position}`}>{value.slice(position, start)}</span>);
+
+    const className = token.startsWith("\"")
+      ? /^\s*:/.test(value.slice(start + token.length))
+        ? "json-key"
+        : "json-string"
+      : /^(true|false|null)$/.test(token)
+        ? "json-literal"
+        : "json-number";
+    parts.push(<span className={className} key={`${start}-${index}`}>{token}</span>);
+    position = start + token.length;
+  }
+
+  if (position < value.length) parts.push(<span key={`text-${position}`}>{value.slice(position)}</span>);
+  return <code>{parts}</code>;
+}
+
 function BrandMark() {
   return (
     <a className="brand" href="#top" aria-label="AVARI'S LAB — Inicio">
@@ -219,17 +244,12 @@ function FeaturedProject({ project, onOpen }: { project: Project; onOpen: () => 
   );
 }
 
-const demoProbabilities = [
-  { level: "LEVEL 00", label: "SIN RIESGO", value: 8 },
-  { level: "LEVEL 01", label: "RIESGO BAJO", value: 16 },
-  { level: "LEVEL 02", label: "RIESGO MODERADO", value: 68 },
-  { level: "LEVEL 03", label: "RIESGO ALTO", value: 8 },
-];
-
 function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: () => void }) {
   const [demoText, setDemoText] = useState("Últimamente me cuesta concentrarme y siento que todo me supera.");
   const [processing, setProcessing] = useState(false);
-  const [analyzed, setAnalyzed] = useState(true);
+  const [response, setResponse] = useState<unknown>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => event.key === "Escape" && onClose();
@@ -241,20 +261,64 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
     };
   }, [onClose]);
 
-  const analyze = () => {
-    if (!demoText.trim()) return;
+  const analyze = async () => {
+    if (!demoText.trim() || processing) return;
     setProcessing(true);
-    setAnalyzed(false);
-    window.setTimeout(() => {
+    setResponse(undefined);
+    setError(null);
+    setCopyStatus("idle");
+
+    const apiUrl = import.meta.env.VITE_API_URL?.replace(/\/+$/, "");
+    if (!apiUrl) {
+      setError("Falta configurar VITE_API_URL para conectar con el servicio.");
       setProcessing(false);
-      setAnalyzed(true);
-    }, 900);
+      return;
+    }
+
+    try {
+      const result = await fetch(`${apiUrl}/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: demoText }),
+      });
+      const data: unknown = await result.json();
+
+      if (!result.ok) {
+        throw new Error(`El servicio respondió con HTTP ${result.status}.`);
+      }
+
+      setResponse(data);
+    } catch (requestError) {
+      setError(
+        requestError instanceof TypeError
+          ? "No se pudo conectar con el servicio. Verifica que esté disponible y que FastAPI permita este origen mediante CORS."
+          : requestError instanceof Error
+            ? requestError.message
+            : "Ocurrió un error inesperado al analizar el texto.",
+      );
+    } finally {
+      setProcessing(false);
+    }
   };
 
   const reset = () => {
     setDemoText("");
     setProcessing(false);
-    setAnalyzed(false);
+    setResponse(undefined);
+    setError(null);
+    setCopyStatus("idle");
+  };
+
+  const responseJson = response !== undefined ? JSON.stringify(response, null, 2) : undefined;
+
+  const copyResponse = async () => {
+    if (responseJson === undefined) return;
+    try {
+      await navigator.clipboard.writeText(responseJson);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
   };
 
   return (
@@ -311,43 +375,28 @@ function EmotionRiskDetail({ project, onClose }: { project: Project; onClose: ()
       <section className="file-section demo-section">
         <span className="file-number">04</span>
         <div className="file-heading"><span>DEMONSTRATION</span><h3>TEST THE<br />INTERFACE.</h3></div>
-        <p className="simulation-note">SIMULATED INTERFACE / NOT CONNECTED TO THE MODEL</p>
+        <p className="simulation-note">LIVE API / PREDICTIONS COME FROM THE BACKEND</p>
         <div className="demo-console">
           <div className="demo-input-panel">
-            <div className="console-bar"><span>POST /predict</span><span>DEMO_MODE = TRUE</span></div>
+            <div className="console-bar"><span>POST /predict</span><span>API_MODE = LIVE</span></div>
             <label htmlFor="risk-input">INPUT / SPANISH TEXT</label>
             <textarea id="risk-input" value={demoText} onChange={(event) => setDemoText(event.target.value)} placeholder="Introduce una frase de prueba…" />
             <div className="demo-controls">
               <button onClick={analyze} disabled={processing || !demoText.trim()} type="button">{processing ? "PROCESSING…" : "ANALYZE TEXT →"}</button>
-              <button onClick={reset} type="button">RESET</button>
+              <button onClick={reset} disabled={processing} type="button">RESET</button>
             </div>
-            <p>Los datos y resultados mostrados son ficticios y sirven únicamente para representar la futura integración con <code>POST /predict</code>.</p>
+            <p>La respuesta se muestra tal como la devuelve el backend. Las tarjetas de clasificación de arriba son una referencia visual, no el resultado de esta solicitud.</p>
           </div>
-          <div className={`demo-result ${processing ? "is-processing" : ""}`}>
-            <div className="console-bar"><span>CLASSIFICATION OUTPUT</span><span>{processing ? "RUNNING" : analyzed ? "SIMULATION READY" : "AWAITING INPUT"}</span></div>
-            {processing && <div className="processing-state"><i /><span>TOKENIZING / RUNNING INFERENCE</span></div>}
-            {!processing && analyzed && (
-              <>
-                <div className="result-primary"><span>ASSIGNED LEVEL</span><strong>02</strong><p>RIESGO MODERADO</p></div>
-                <div className="confidence"><span>SIMULATED CONFIDENCE</span><strong>68%</strong></div>
-                <div className="probabilities">
-                  {demoProbabilities.map((item) => (
-                    <div key={item.level}><span>{item.level}<small>{item.label}</small></span><i><b style={{ width: `${item.value}%` }} /></i><strong>{item.value}%</strong></div>
-                  ))}
-                </div>
-              </>
-            )}
-            {!processing && !analyzed && <div className="awaiting-state">NO SIMULATED RESULT / ENTER TEXT TO BEGIN</div>}
+          <div className={`demo-result ${processing ? "is-processing" : ""}`} aria-busy={processing}>
+            <div className="console-bar"><span>API REQUEST</span><span className="request-status" role="status" aria-live="polite">{processing ? "RUNNING" : error ? "ERROR" : response !== undefined ? "COMPLETE" : "READY"}</span></div>
+            {processing && <div className="processing-state" aria-live="polite"><span className="loading-message">SOLICITANDO<span className="loading-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span></div>}
+            {!processing && error && <div className="awaiting-state" role="alert">{error}</div>}
+            {!processing && !error && response === undefined && <div className="awaiting-state">SUBMIT TEXT TO SEE THE BACKEND RESPONSE</div>}
           </div>
           <div className="json-panel">
-            <div className="console-bar"><span>JSON RESPONSE / SIMULATED</span><span>200 OK</span></div>
-            <pre>{analyzed && !processing ? `{
-  "simulation": true,
-  "level": 2,
-  "label": "riesgo_moderado",
-  "confidence": 0.68,
-  "endpoint_ready": "/predict"
-}` : `{\n  "status": "awaiting_simulation"\n}`}</pre>
+            <div className="console-bar"><span>JSON RESPONSE / BACKEND</span><div className="json-panel-actions"><span>{responseJson !== undefined ? "RECEIVED" : "—"}</span><button className="copy-response" onClick={copyResponse} disabled={responseJson === undefined} type="button" aria-label="Copiar respuesta JSON">{copyStatus === "copied" ? "COPIED" : copyStatus === "error" ? "COPY FAILED" : "COPY JSON"}</button></div></div>
+            <pre>{responseJson !== undefined ? <JsonResponse value={responseJson} /> : "// La respuesta real aparecerá aquí."}</pre>
+            <span className="copy-status" role="status" aria-live="polite">{copyStatus === "copied" ? "JSON copiado al portapapeles." : copyStatus === "error" ? "No se pudo copiar. Revisa los permisos del navegador." : ""}</span>
           </div>
         </div>
         <p className="clinical-note">NOTA / Este es un proyecto experimental de clasificación de texto. Sus resultados son orientativos, no constituyen un diagnóstico y no sustituyen una evaluación profesional.</p>
